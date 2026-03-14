@@ -16,7 +16,10 @@ PIN_DIR    := /sys/fs/bpf/syscall_watcher
 FIND_MAP = $$($(BPFTOOL) map show --json 2>/dev/null | \
 	python3 -c "import sys,json; ms=json.load(sys.stdin); print(next((m['id'] for m in ms if m.get('name')=='$(1)'),''))" 2>/dev/null)
 
-.PHONY: all clean vmlinux load unload watch
+# Helper: encode a u64 as 8-byte little-endian hex
+U64_HEX = $$(python3 -c "v=$(1); print(' '.join(f'{(v>>(i*8))&0xff:02x}' for i in range(8)))")
+
+.PHONY: all clean vmlinux load unload watch summary
 
 all: $(BPF_OBJ)
 
@@ -34,35 +37,55 @@ $(BPF_OBJ): $(BPF_SRC) $(VMLINUX_H)
 		-o $@
 	$(LLVM_STRIP) -g $@
 
-# Usage: sudo make load PID=<pid> [FILTER=default|minimal|file|network|all]
+# Usage:
+#   sudo make load PID=<pid>                          # trace a process
+#   sudo make load CONTAINER=<id_or_name>             # trace a container
+#   sudo make load PID=<pid> FILTER=network           # trace only network syscalls
+#   sudo make load CONTAINER=<id> FILTER=minimal      # minimal tracing for a container
 PID             ?= 0
+CONTAINER       ?=
 FOLLOW_CHILDREN ?= 1
 FILTER          ?= default
 
 load: $(BPF_OBJ)
-	@if [ "$(PID)" = "0" ]; then \
-		echo "Usage: sudo make load PID=<pid> [FILTER=default|minimal|file|network|all]"; \
+	@if [ "$(PID)" = "0" ] && [ -z "$(CONTAINER)" ]; then \
+		echo "Usage:"; \
+		echo "  sudo make load PID=<pid>              # trace a process"; \
+		echo "  sudo make load CONTAINER=<id_or_name> # trace a container"; \
+		echo ""; \
+		echo "Options:"; \
+		echo "  FILTER=default|minimal|file|network|all"; \
+		echo "  FOLLOW_CHILDREN=1|0"; \
 		exit 1; \
 	fi
-	@echo "==> Loading BPF programs, targeting PID $(PID) (follow_children=$(FOLLOW_CHILDREN), filter=$(FILTER))"
 	@mkdir -p $(PIN_DIR)
 	$(BPFTOOL) prog loadall $(BPF_OBJ) $(PIN_DIR) autoattach
 	@echo "==> Programs loaded and attached"
-	@# Configure target PID
+	@# Find config map
 	MAP_ID=$(call FIND_MAP,watcher_config); \
-	if [ -n "$$MAP_ID" ]; then \
+	if [ -z "$$MAP_ID" ]; then \
+		echo "ERROR: Could not find watcher_config map"; exit 1; \
+	fi; \
+	if [ -n "$(CONTAINER)" ]; then \
+		echo "==> Resolving container '$(CONTAINER)' to cgroup ID"; \
+		CGID=$$(./resolve_container.sh "$(CONTAINER)"); \
+		if [ -z "$$CGID" ]; then \
+			echo "ERROR: Could not resolve container"; exit 1; \
+		fi; \
+		echo "==> Targeting cgroup ID $$CGID"; \
+		$(BPFTOOL) map update id $$MAP_ID \
+			key hex 02 00 00 00 \
+			value hex $(call U64_HEX,$$CGID); \
+	fi; \
+	if [ "$(PID)" != "0" ]; then \
 		echo "==> Setting target PID=$(PID)"; \
 		$(BPFTOOL) map update id $$MAP_ID \
 			key hex 00 00 00 00 \
-			value hex $$(printf '%02x %02x %02x %02x 00 00 00 00' \
-				$$(( $(PID) & 0xff )) $$(( ($(PID) >> 8) & 0xff )) \
-				$$(( ($(PID) >> 16) & 0xff )) $$(( ($(PID) >> 24) & 0xff )) ); \
-		$(BPFTOOL) map update id $$MAP_ID \
-			key hex 01 00 00 00 \
-			value hex 0$(FOLLOW_CHILDREN) 00 00 00 00 00 00 00; \
-	else \
-		echo "ERROR: Could not find watcher_config map"; exit 1; \
-	fi
+			value hex $(call U64_HEX,$(PID)); \
+	fi; \
+	$(BPFTOOL) map update id $$MAP_ID \
+		key hex 01 00 00 00 \
+		value hex 0$(FOLLOW_CHILDREN) 00 00 00 00 00 00 00
 	@# Populate syscall names
 	NAMES_ID=$(call FIND_MAP,syscall_names); \
 	if [ -n "$$NAMES_ID" ]; then \
@@ -85,7 +108,6 @@ watch:
 	cat /sys/kernel/debug/tracing/trace_pipe
 
 # Cumulative stats summary, refreshes every INTERVAL seconds
-# Usage: sudo make summary [INTERVAL=5]
 INTERVAL ?= 5
 summary:
 	./summary.sh $(INTERVAL)
