@@ -1,0 +1,6 @@
+# Block all network operations.
+# Prevents the target from creating sockets, connecting, binding, or listening.
+block socket
+block connect
+block bind
+block listen

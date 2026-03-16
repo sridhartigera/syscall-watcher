@@ -1,0 +1,7 @@
+# Enforce read-only filesystem access.
+# Blocks all write, delete, rename, and directory modification operations.
+block write
+block unlink
+block rename
+block mkdir
+block rmdir

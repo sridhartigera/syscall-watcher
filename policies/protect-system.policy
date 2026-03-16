@@ -1,0 +1,8 @@
+# Block all modifications to system directories.
+protect /etc   file_open write unlink rename mkdir rmdir
+protect /usr   file_open write unlink rename mkdir rmdir
+protect /boot  file_open write unlink rename mkdir rmdir
+
+# Also block the target from spawning network servers.
+block bind
+block listen

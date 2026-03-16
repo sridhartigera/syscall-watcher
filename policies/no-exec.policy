@@ -1,0 +1,3 @@
+# Block process execution.
+# Prevents the target from running any new programs via execve.
+block exec
